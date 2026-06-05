@@ -1,0 +1,56 @@
+name: Deploy to server
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-english-words-production
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Deploy over SSH
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: 109.172.87.179
+          username: root
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          port: 22
+          script_stop: true
+          command_timeout: 30m
+          script: |
+            set -e
+            PROJECT_PATH="/habbit/englishWords"
+            REPO_URL="git@github.com:Kirives/englishWords.git"
+            if [ ! -d "$PROJECT_PATH/.git" ]; then
+              mkdir -p "$PROJECT_PATH"
+              git clone "$REPO_URL" "$PROJECT_PATH"
+            fi
+            cd "$PROJECT_PATH"
+            PREV_HEAD="$(git rev-parse HEAD 2>/dev/null || true)"
+            git fetch --all
+            git reset --hard origin/main
+
+            CHANGED_FILES="$(git diff --name-only "$PREV_HEAD" HEAD || true)"
+            BUILD_SERVICES=""
+
+            if echo "$CHANGED_FILES" | grep -qE '^backend/|^docker-compose\.yml$'; then
+              BUILD_SERVICES="$BUILD_SERVICES backend"
+            fi
+
+            if echo "$CHANGED_FILES" | grep -qE '^frontend/|^docker-compose\.yml$'; then
+              BUILD_SERVICES="$BUILD_SERVICES frontend"
+            fi
+
+            if [ -n "$BUILD_SERVICES" ]; then
+              docker compose up -d --build $BUILD_SERVICES
+            fi
+
+            docker compose up -d
+            docker image prune -f
