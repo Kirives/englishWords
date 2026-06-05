@@ -129,9 +129,7 @@ function settingsFromRow(row) {
 }
 
 function settingsSnapshotFromRow(row) {
-  const settings = settingsFromRow(row);
-  delete settings.autoStartWordOnTraining;
-  return settings;
+  return settingsFromRow(row);
 }
 
 function modeStatuses(mode) {
@@ -491,9 +489,10 @@ app.post("/api/english-words/trainings", requireAuth, async (req, res) => {
     const mode = String(req.body.mode || "");
     if (!MODES.has(mode)) return res.status(400).json({ error: "INVALID_TRAINING_MODE", message: "Недопустимый режим тренировки." });
     const globalSettingsRow = await getTrainingSettings(req.user.id);
+    const baseSnapshot = settingsSnapshotFromRow(globalSettingsRow);
     const settingsSnapshot = req.body.overrideSettings
-      ? normalizeSettingsPayload(req.body.overrideSettings, false)
-      : settingsSnapshotFromRow(globalSettingsRow);
+      ? { ...baseSnapshot, ...normalizeSettingsPayload(req.body.overrideSettings, false) }
+      : baseSnapshot;
     const modeStats = await getModeStats(req.user.id, mode, settingsSnapshot);
     if (modeStats.total === 0) return res.status(400).json({ error: "NO_WORDS_AVAILABLE", message: "Нет слов для тренировки с выбранными настройками." });
     const activeWordsCount = await db.query("SELECT COUNT(*)::int AS total FROM words WHERE user_id = $1 AND is_active = true", [req.user.id]);
@@ -533,6 +532,7 @@ app.get("/api/english-words/trainings/:sessionId/next", requireAuth, async (req,
       prompt,
       options,
       hideOptionsUntilReveal: Boolean(session.settings_snapshot.hideOptionsUntilReveal),
+      autoAdvanceAfterAnswer: Boolean(session.settings_snapshot.autoStartWordOnTraining),
     };
     await db.query("UPDATE training_sessions SET current_question_snapshot = $1::jsonb, updated_at = now() WHERE id = $2 AND user_id = $3", [JSON.stringify(snapshot), session.id, req.user.id]);
     return res.json(snapshot);

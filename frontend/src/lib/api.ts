@@ -52,6 +52,7 @@ export interface TrainingQuestion {
   prompt: string;
   options: Array<{ id: string; text: string }>;
   hideOptionsUntilReveal: boolean;
+  autoAdvanceAfterAnswer: boolean;
   finished?: false;
 }
 

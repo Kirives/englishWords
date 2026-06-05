@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { toast } from "sonner";
-import { api, type AnswerResponse, type TrainingQuestion } from "@/lib/api";
+import { api, type AnswerResponse, type TrainingFinished, type TrainingQuestion } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 
@@ -14,17 +14,29 @@ export default function TrainingSession() {
   const [processed, setProcessed] = useState(0);
   const [optionsRevealed, setOptionsRevealed] = useState(false);
 
+  const isFinishedResponse = (value: TrainingQuestion | TrainingFinished): value is TrainingFinished => {
+    return "finished" in value && value.finished === true;
+  };
+
   const loadNext = useCallback(async () => {
     setAnswer(null);
     setOptionsRevealed(false);
     try {
       const next = await api.getNextQuestion(sessionId);
-      if ("finished" in next && next.finished) { setQuestion(null); setFinishedMessage(next.message); return; }
+      if (isFinishedResponse(next)) { setQuestion(null); setFinishedMessage(next.message); return; }
       setFinishedMessage(""); setQuestion(next);
     } catch (e) { toast.error(e instanceof Error ? e.message : "Не удалось получить вопрос"); }
   }, [sessionId]);
 
   useEffect(() => { void loadNext(); }, [loadNext]);
+
+  useEffect(() => {
+    if (!answer || !question?.autoAdvanceAfterAnswer) return;
+    const timeoutId = window.setTimeout(() => {
+      void loadNext();
+    }, 900);
+    return () => window.clearTimeout(timeoutId);
+  }, [answer, question, loadNext]);
 
   const choose = async (selectedOptionId: string) => {
     if (!question || answer) return;
@@ -48,16 +60,18 @@ export default function TrainingSession() {
         <Card className="border-border/50">
           <CardHeader><CardDescription className="text-xs">{question.questionType === "RU_TO_EN" ? "Выберите английское слово" : "Выберите русский перевод"}</CardDescription><CardTitle className="text-xl leading-relaxed">{question.prompt}</CardTitle></CardHeader>
           <CardContent className="space-y-3">
-            {question.hideOptionsUntilReveal && !optionsRevealed && !answer && <div className="rounded-md border border-primary/20 bg-primary/5 p-3 text-sm"><p className="font-medium">Варианты скрыты</p><p className="mt-1 text-xs text-muted-foreground">Попробуйте вспомнить ответ без подсказок, затем откройте варианты.</p><Button className="mt-3 h-9 text-sm" onClick={() => setOptionsRevealed(true)}>Показать варианты</Button></div>}
-            <div className="grid gap-2">
+            <div className="relative">
+              <div className="grid gap-2">
               {question.options.map((option) => {
                 const isCorrect = answer?.correctOptionId === option.id;
                 const hidden = question.hideOptionsUntilReveal && !optionsRevealed && !answer;
                 return <Button key={option.id} variant={answer ? (isCorrect ? "default" : "outline") : "outline"} className={`min-h-11 justify-start whitespace-normal text-left transition ${hidden ? "pointer-events-none select-none blur-sm opacity-60" : ""}`} disabled={Boolean(answer) || hidden} onClick={() => choose(option.id)}>{option.text}</Button>;
               })}
+              </div>
+              {question.hideOptionsUntilReveal && !optionsRevealed && !answer && <div className="absolute inset-0 flex items-center justify-center rounded-md border border-primary/20 bg-background/85 backdrop-blur-sm"><div className="max-w-sm text-center text-sm"><p className="font-medium">Варианты скрыты</p><p className="mt-1 text-xs text-muted-foreground">Попробуйте вспомнить ответ без подсказок, затем откройте варианты.</p><Button className="mt-3 h-9 text-sm" onClick={() => setOptionsRevealed(true)}>Показать варианты</Button></div></div>}
             </div>
             {answer && <div className={`rounded-md p-3 text-sm ${answer.isCorrect ? "bg-green-500/10 text-green-700" : "bg-destructive/10 text-destructive"}`}>{answer.isCorrect ? "Правильно" : `Неправильно. Правильный ответ: ${answer.correctText}`}</div>}
-            <div className="flex gap-2"><Button variant="outline" onClick={skip} disabled={Boolean(answer)}>Пропустить</Button>{answer && <Button onClick={loadNext}>Следующий вопрос</Button>}</div>
+            <div className="flex gap-2"><Button variant="outline" onClick={skip} disabled={Boolean(answer)}>Пропустить</Button>{answer && !question.autoAdvanceAfterAnswer && <Button onClick={loadNext}>Следующий вопрос</Button>}{answer && question.autoAdvanceAfterAnswer && <div className="flex items-center text-xs text-muted-foreground">Переход к следующему вопросу…</div>}</div>
           </CardContent>
         </Card>
       ) : <div className="text-sm text-muted-foreground">Загрузка вопроса...</div>}
