@@ -2,9 +2,11 @@ import { useCallback, useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { BookOpen, Layers, Loader2, Sparkles } from "lucide-react";
 import { toast } from "sonner";
-import { api, type ModeStats, type StatsResponse, type TrainingMode } from "@/lib/api";
+import { api, type AiProviderSettings, type ModeStats, type StatsResponse, type TrainingMode } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import { EnrichContextExamplesDialog } from "@/components/EnrichContextExamplesDialog";
 
 const modeCards: Array<{ key: keyof StatsResponse; mode: TrainingMode; title: string; description: string; icon: typeof BookOpen }> = [
   { key: "inProgress", mode: "in_progress", title: "Слова в обучении", description: "Только слова со статусом in_progress", icon: BookOpen },
@@ -51,12 +53,15 @@ function ModeCard({ title, description, mode, icon: Icon, stats }: { title: stri
 
 export default function Index() {
   const [stats, setStats] = useState<StatsResponse>(emptyStats);
+  const [aiSettings, setAiSettings] = useState<AiProviderSettings | null>(null);
   const [loading, setLoading] = useState(true);
 
   const loadStats = useCallback(async () => {
     setLoading(true);
     try {
-      setStats(await api.getStats());
+      const [statsResponse, aiResponse] = await Promise.all([api.getStats(), api.getAiSettings().catch(() => null)]);
+      setStats(statsResponse);
+      setAiSettings(aiResponse);
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Не удалось загрузить статистику");
     } finally {
@@ -73,7 +78,17 @@ export default function Index() {
           <h1 className="text-lg font-semibold tracking-tight">Тренировка английских слов</h1>
           <p className="text-xs text-muted-foreground">Слова проходят равномерными кругами, а счётчики не смешиваются между режимами.</p>
         </div>
-        <Button variant="outline" size="sm" onClick={loadStats} disabled={loading}>{loading && <Loader2 className="mr-2 h-3.5 w-3.5 animate-spin" />}Обновить</Button>
+        <div className="flex gap-2">
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <div>
+                <EnrichContextExamplesDialog aiSettings={aiSettings} disabled={!aiSettings?.hasApiKey} />
+              </div>
+            </TooltipTrigger>
+            {!aiSettings?.hasApiKey && <TooltipContent>Сначала настройте AI API.</TooltipContent>}
+          </Tooltip>
+          <Button variant="outline" size="sm" onClick={loadStats} disabled={loading}>{loading && <Loader2 className="mr-2 h-3.5 w-3.5 animate-spin" />}Обновить</Button>
+        </div>
       </div>
       <div className="grid gap-4 md:grid-cols-3">
         {modeCards.map((card) => <ModeCard key={card.mode} {...card} stats={stats[card.key]} />)}

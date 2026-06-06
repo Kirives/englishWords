@@ -8,6 +8,7 @@ const jwt = require("jsonwebtoken");
 const db = require("./db");
 const { requireAuth } = require("./auth");
 const { initDb } = require("./initDb");
+const { registerAiRoutes } = require("./aiModule");
 
 const app = express();
 const PORT = Number(process.env.PORT || 3020);
@@ -155,6 +156,8 @@ async function getTrainingSettings(userId, client = db) {
   const result = await client.query("SELECT * FROM user_training_settings WHERE user_id = $1", [userId]);
   return result.rows[0];
 }
+
+registerAiRoutes(app, { db, requireAuth, getTrainingSettings });
 
 async function ensureStatForWord(client, userId, wordId, scope, initialShownCount = null) {
   let shownCount = initialShownCount;

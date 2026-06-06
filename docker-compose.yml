@@ -31,6 +31,7 @@ services:
       DB_USER: ${DB_USER}
       DB_PASSWORD: ${DB_PASSWORD}
       JWT_SECRET: ${JWT_SECRET}
+      AI_SETTINGS_ENCRYPTION_SECRET: ${AI_SETTINGS_ENCRYPTION_SECRET}
       CORS_ORIGIN: ${CORS_ORIGIN}
     depends_on:
       db:

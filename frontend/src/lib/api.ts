@@ -67,6 +67,51 @@ export interface AnswerResponse {
   correctText: string;
 }
 
+export interface AiProviderSettings {
+  baseUrl: string;
+  hasApiKey: boolean;
+  apiKeyMasked: string;
+  modelName: string;
+  temperature: number;
+  maxOutputTokens: number;
+  wordsPerBatch: number;
+  requestTimeoutSec: number;
+  lastCheckStatus: string;
+  lastCheckAt: string | null;
+  lastCheckError: string | null;
+}
+
+export interface AiProviderSettingsUpdatePayload {
+  baseUrl: string;
+  apiKey?: string;
+  modelName: string;
+  temperature: number;
+  maxOutputTokens: number;
+  wordsPerBatch: number;
+  requestTimeoutSec: number;
+}
+
+export interface ContextGenerationJob {
+  jobId: string;
+  status: string;
+  targetWordsCount: number;
+  processedWordsCount: number;
+  generatedExamplesCount: number;
+  validExamplesCount: number;
+  invalidExamplesCount: number;
+  failedWordsCount: number;
+  errorMessage?: string | null;
+  errorDetails?: Array<{ word: string; reason: string }>;
+}
+
+export interface ContextGenerationJobCreateResponse {
+  jobId: string;
+  status: string;
+  targetWordsCount: number;
+  estimatedExamplesCount: number;
+  estimatedAiRequestsCount: number;
+}
+
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || "/api";
 const TOKEN_KEY = "english_words_token";
 
@@ -160,6 +205,29 @@ export const api = {
     return apiRequest<TrainingSettings>("/english-words/settings", { method: "GET" }, true);
   },
 
+  getAiSettings() {
+    return apiRequest<AiProviderSettings>("/english-words/ai-settings", { method: "GET" }, true);
+  },
+
+  updateAiSettings(payload: AiProviderSettingsUpdatePayload) {
+    return apiRequest<AiProviderSettings>(
+      "/english-words/ai-settings",
+      {
+        method: "PATCH",
+        body: JSON.stringify(payload),
+      },
+      true
+    );
+  },
+
+  testAiSettings() {
+    return apiRequest<{ status: string; message: string }>(
+      "/english-words/ai-settings/test",
+      { method: "POST" },
+      true
+    );
+  },
+
   updateSettings(payload: TrainingSettings) {
     return apiRequest<TrainingSettings>(
       "/english-words/settings",
@@ -173,6 +241,41 @@ export const api = {
 
   getStats() {
     return apiRequest<StatsResponse>("/english-words/stats", { method: "GET" }, true);
+  },
+
+  createContextEnrichmentJob(payload: {
+    wordScope: string;
+    generationMode: string;
+    sentencesPerWord: number;
+    difficultyDistribution: { simple: number; medium: number; hard: number };
+    maxWordsPerJob: number;
+    wordsPerBatch: number;
+    useFrequencyFilter: boolean;
+  }) {
+    return apiRequest<ContextGenerationJobCreateResponse>(
+      "/english-words/context-examples/enrich",
+      {
+        method: "POST",
+        body: JSON.stringify(payload),
+      },
+      true
+    );
+  },
+
+  getContextGenerationJob(jobId: string) {
+    return apiRequest<ContextGenerationJob>(
+      `/english-words/context-examples/jobs/${jobId}`,
+      { method: "GET" },
+      true
+    );
+  },
+
+  cancelContextGenerationJob(jobId: string) {
+    return apiRequest<{ status: string }>(
+      `/english-words/context-examples/jobs/${jobId}/cancel`,
+      { method: "POST" },
+      true
+    );
   },
 
   createTraining(mode: TrainingMode, overrideSettings?: TrainingSettingsSnapshot) {

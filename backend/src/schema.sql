@@ -27,6 +27,84 @@ CREATE TABLE IF NOT EXISTS user_training_settings (
 ALTER TABLE user_training_settings
   ADD COLUMN IF NOT EXISTS hide_options_until_reveal boolean NOT NULL DEFAULT false;
 
+CREATE TABLE IF NOT EXISTS ai_provider_settings (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id uuid NOT NULL UNIQUE REFERENCES users(id) ON DELETE CASCADE,
+  base_url text NOT NULL DEFAULT 'https://api.openai.com/v1',
+  api_key_encrypted text,
+  model_name text NOT NULL DEFAULT 'gpt-4o-mini',
+  temperature numeric(3,2) NOT NULL DEFAULT 0.4,
+  max_output_tokens integer NOT NULL DEFAULT 8000,
+  words_per_batch integer NOT NULL DEFAULT 5,
+  request_timeout_sec integer NOT NULL DEFAULT 60,
+  last_check_status text NOT NULL DEFAULT 'not_checked',
+  last_check_at timestamptz,
+  last_check_error text,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  CONSTRAINT chk_ai_words_per_batch CHECK (words_per_batch BETWEEN 1 AND 10),
+  CONSTRAINT chk_ai_request_timeout CHECK (request_timeout_sec BETWEEN 5 AND 300),
+  CONSTRAINT chk_ai_temperature CHECK (temperature >= 0 AND temperature <= 1)
+);
+
+CREATE TABLE IF NOT EXISTS context_generation_jobs (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  status text NOT NULL DEFAULT 'pending',
+  mode text NOT NULL,
+  target_words_count integer NOT NULL DEFAULT 0,
+  processed_words_count integer NOT NULL DEFAULT 0,
+  generated_examples_count integer NOT NULL DEFAULT 0,
+  valid_examples_count integer NOT NULL DEFAULT 0,
+  invalid_examples_count integer NOT NULL DEFAULT 0,
+  failed_words_count integer NOT NULL DEFAULT 0,
+  settings_snapshot jsonb NOT NULL,
+  prompt_version text NOT NULL,
+  started_at timestamptz,
+  finished_at timestamptz,
+  error_message text,
+  error_details jsonb NOT NULL DEFAULT '[]'::jsonb,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  CONSTRAINT chk_context_job_status CHECK (status IN ('pending', 'running', 'completed', 'failed', 'cancelled'))
+);
+
+CREATE TABLE IF NOT EXISTS word_context_examples (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  word_id uuid NOT NULL REFERENCES words(id) ON DELETE CASCADE,
+  generation_job_id uuid REFERENCES context_generation_jobs(id) ON DELETE SET NULL,
+  source text NOT NULL,
+  difficulty text NOT NULL,
+  cefr text,
+  full_sentence text NOT NULL,
+  full_sentence_marked text NOT NULL,
+  full_sentence_normalized text NOT NULL,
+  masked_sentence text NOT NULL,
+  answer_text text NOT NULL,
+  answer_normalized text NOT NULL,
+  ru_translation text,
+  part_of_speech text NOT NULL,
+  grammar_form text NOT NULL,
+  ai_model text,
+  prompt_version text,
+  is_active boolean NOT NULL DEFAULT true,
+  quality_status text NOT NULL DEFAULT 'valid',
+  reject_reason text,
+  shown_count integer NOT NULL DEFAULT 0,
+  correct_count integer NOT NULL DEFAULT 0,
+  wrong_count integer NOT NULL DEFAULT 0,
+  skipped_count integer NOT NULL DEFAULT 0,
+  hint_shown_count integer NOT NULL DEFAULT 0,
+  last_shown_at timestamptz,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  CONSTRAINT chk_context_source CHECK (source IN ('imported', 'ai', 'manual')),
+  CONSTRAINT chk_context_difficulty CHECK (difficulty IN ('simple', 'medium', 'hard')),
+  CONSTRAINT chk_context_quality_status CHECK (quality_status IN ('valid', 'invalid', 'needs_review')),
+  UNIQUE (user_id, word_id, full_sentence_normalized)
+);
+
 CREATE TABLE IF NOT EXISTS words (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   user_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -119,3 +197,7 @@ CREATE INDEX IF NOT EXISTS idx_training_sessions_user_mode ON training_sessions(
 CREATE INDEX IF NOT EXISTS idx_training_attempts_session ON training_attempts(session_id);
 CREATE INDEX IF NOT EXISTS idx_training_attempts_user_word ON training_attempts(user_id, word_id);
 CREATE INDEX IF NOT EXISTS idx_training_attempts_user_scope ON training_attempts(user_id, scope);
+CREATE INDEX IF NOT EXISTS idx_ai_provider_settings_user ON ai_provider_settings(user_id);
+CREATE INDEX IF NOT EXISTS idx_context_generation_jobs_user_status ON context_generation_jobs(user_id, status);
+CREATE INDEX IF NOT EXISTS idx_word_context_examples_word_active ON word_context_examples(word_id, is_active);
+CREATE INDEX IF NOT EXISTS idx_word_context_examples_user_word ON word_context_examples(user_id, word_id);
