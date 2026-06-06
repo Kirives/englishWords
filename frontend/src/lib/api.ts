@@ -12,6 +12,7 @@ export interface TrainingSettings {
   includeUnknownFrequency: boolean;
   ruToEnOptionsCount: number;
   enToRuOptionsCount: number;
+  contextOptionsCount: number;
   trainingDirectionMode: TrainingDirectionMode;
   hideOptionsUntilReveal: boolean;
   autoStartWordOnTraining: boolean;
@@ -46,13 +47,20 @@ export interface TrainingCreateResponse {
   settingsSnapshot: TrainingSettingsSnapshot;
 }
 
+export type QuestionTypeMode = "default" | "context_cloze";
+
 export interface TrainingQuestion {
   wordId: string;
   questionType: QuestionType;
   prompt: string;
-  options: Array<{ id: string; text: string }>;
+  options: Array<{ id: string; wordId?: string; text: string }>;
   hideOptionsUntilReveal: boolean;
   autoAdvanceAfterAnswer: boolean;
+  contextExampleId?: string;
+  translationAvailable?: boolean;
+  fullSentence?: string | null;
+  ruTranslation?: string | null;
+  correctAnswerText?: string | null;
   finished?: false;
 }
 
@@ -64,7 +72,11 @@ export interface TrainingFinished {
 export interface AnswerResponse {
   isCorrect: boolean;
   correctOptionId: string;
+  correctWordId?: string;
   correctText: string;
+  correctAnswerText?: string;
+  fullSentence?: string | null;
+  ruTranslation?: string | null;
 }
 
 export interface AiProviderSettings {
@@ -289,6 +301,17 @@ export const api = {
     );
   },
 
+  createContextTraining(mode: TrainingMode, overrideSettings?: TrainingSettingsSnapshot) {
+    return apiRequest<TrainingCreateResponse>(
+      "/english-words/trainings",
+      {
+        method: "POST",
+        body: JSON.stringify({ mode, overrideSettings, questionTypeMode: "context_cloze" }),
+      },
+      true
+    );
+  },
+
   getNextQuestion(sessionId: string) {
     return apiRequest<TrainingQuestion | TrainingFinished>(
       `/english-words/trainings/${sessionId}/next`,
@@ -297,7 +320,15 @@ export const api = {
     );
   },
 
-  answerQuestion(sessionId: string, payload: { wordId: string; questionType: QuestionType; selectedOptionId: string }) {
+  answerQuestion(sessionId: string, payload: {
+    wordId: string;
+    questionType: QuestionType;
+    selectedOptionId?: string;
+    contextExampleId?: string;
+    selectedOptionWordId?: string;
+    selectedOptionText?: string;
+    hintTranslationShown?: boolean;
+  }) {
     return apiRequest<AnswerResponse>(
       `/english-words/trainings/${sessionId}/answer`,
       {
@@ -308,7 +339,7 @@ export const api = {
     );
   },
 
-  skipQuestion(sessionId: string, payload: { wordId: string; questionType: QuestionType }) {
+  skipQuestion(sessionId: string, payload: { wordId: string; questionType: QuestionType; contextExampleId?: string; hintTranslationShown?: boolean }) {
     return apiRequest<{ skipped: true }>(
       `/english-words/trainings/${sessionId}/skip`,
       {
@@ -323,6 +354,14 @@ export const api = {
     return apiRequest<{ status: "finished"; finishedAt: string }>(
       `/english-words/trainings/${sessionId}/finish`,
       { method: "POST" },
+      true
+    );
+  },
+
+  getContextTranslation(contextExampleId: string) {
+    return apiRequest<{ contextExampleId: string; ruTranslation: string | null }>(
+      `/english-words/context-examples/${contextExampleId}/translation`,
+      { method: "GET" },
       true
     );
   },

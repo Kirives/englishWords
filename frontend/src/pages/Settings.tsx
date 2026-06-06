@@ -30,7 +30,7 @@ export default function Settings() {
     temperature: 0.4,
     maxOutputTokens: 8000,
     wordsPerBatch: 5,
-    requestTimeoutSec: 60,
+    requestTimeoutSec: 240,
     lastCheckStatus: "not_checked",
     lastCheckAt: null as string | null,
     lastCheckError: null as string | null,

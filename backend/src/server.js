@@ -15,8 +15,9 @@ const PORT = Number(process.env.PORT || 3020);
 const JWT_SECRET = process.env.JWT_SECRET || "dev-secret";
 
 const MODES = new Set(["in_progress", "not_started", "all"]);
-const QUESTION_TYPES = new Set(["RU_TO_EN", "EN_TO_RU"]);
+const QUESTION_TYPES = new Set(["RU_TO_EN", "EN_TO_RU", "CONTEXT_CLOZE"]);
 const DIRECTION_MODES = new Set(["mixed", "ru_to_en_only", "en_to_ru_only"]);
+const QUESTION_TYPE_MODES = new Set(["default", "context_cloze"]);
 
 const corsOrigin = process.env.CORS_ORIGIN
   ? process.env.CORS_ORIGIN.split(",").map((value) => value.trim())
@@ -108,6 +109,7 @@ function normalizeSettingsPayload(payload = {}, includeAutoStart = true) {
     includeUnknownFrequency: toBoolean(payload.includeUnknownFrequency),
     ruToEnOptionsCount: clamp(payload.ruToEnOptionsCount, 2, 8, 4),
     enToRuOptionsCount: clamp(payload.enToRuOptionsCount, 2, 8, 4),
+    contextOptionsCount: clamp(payload.contextOptionsCount, 2, 8, 4),
     trainingDirectionMode: DIRECTION_MODES.has(payload.trainingDirectionMode) ? payload.trainingDirectionMode : "mixed",
     hideOptionsUntilReveal: toBoolean(payload.hideOptionsUntilReveal),
   };
@@ -123,6 +125,7 @@ function settingsFromRow(row) {
     includeUnknownFrequency: Boolean(row.include_unknown_frequency),
     ruToEnOptionsCount: Number(row.ru_to_en_options_count),
     enToRuOptionsCount: Number(row.en_to_ru_options_count),
+    contextOptionsCount: Number(row.context_options_count || 4),
     trainingDirectionMode: row.training_direction_mode,
     hideOptionsUntilReveal: Boolean(row.hide_options_until_reveal),
     autoStartWordOnTraining: Boolean(row.auto_start_word_on_training),
@@ -223,6 +226,49 @@ async function getModeStats(userId, mode, settings) {
   };
 }
 
+async function getContextModeStats(userId, mode, settings) {
+  const statuses = modeStatuses(mode);
+  const result = await db.query(
+    `SELECT COUNT(*)::int AS total, MIN(COALESCE(s.shown_count, 0))::int AS min_shown
+     FROM words w
+     LEFT JOIN word_training_stats s ON s.user_id = w.user_id AND s.word_id = w.id AND s.scope = $2
+     WHERE w.user_id = $1
+       AND w.is_active = true
+       AND w.status = ANY($3::text[])
+       AND EXISTS (
+         SELECT 1 FROM word_context_examples e
+         WHERE e.user_id = w.user_id AND e.word_id = w.id AND e.is_active = true
+       )
+       AND ((w.frequency_rank IS NOT NULL AND w.frequency_rank <= $4) OR (w.frequency_rank IS NULL AND $5::boolean = true))`,
+    [userId, mode, statuses, settings.maxFrequencyRank, settings.includeUnknownFrequency]
+  );
+  const total = Number(result.rows[0]?.total || 0);
+  const minShown = result.rows[0]?.min_shown;
+  if (!total || minShown === null || minShown === undefined) {
+    return { total: 0, currentCycle: 0, remainingInCycle: 0 };
+  }
+  const remainingResult = await db.query(
+    `SELECT COUNT(*)::int AS remaining
+     FROM words w
+     LEFT JOIN word_training_stats s ON s.user_id = w.user_id AND s.word_id = w.id AND s.scope = $2
+     WHERE w.user_id = $1
+       AND w.is_active = true
+       AND w.status = ANY($3::text[])
+       AND EXISTS (
+         SELECT 1 FROM word_context_examples e
+         WHERE e.user_id = w.user_id AND e.word_id = w.id AND e.is_active = true
+       )
+       AND ((w.frequency_rank IS NOT NULL AND w.frequency_rank <= $4) OR (w.frequency_rank IS NULL AND $5::boolean = true))
+       AND COALESCE(s.shown_count, 0) = $6`,
+    [userId, mode, statuses, settings.maxFrequencyRank, settings.includeUnknownFrequency, Number(minShown)]
+  );
+  return {
+    total,
+    currentCycle: Number(minShown) + 1,
+    remainingInCycle: Number(remainingResult.rows[0]?.remaining || 0),
+  };
+}
+
 async function selectNextWord(userId, session) {
   const settings = session.settings_snapshot;
   const statuses = modeStatuses(session.mode);
@@ -257,6 +303,93 @@ async function selectNextWord(userId, session) {
     baseParams.slice(0, 5)
   );
   return result.rows[0] || null;
+}
+
+async function selectNextContextWord(userId, session) {
+  const settings = session.settings_snapshot;
+  const statuses = modeStatuses(session.mode);
+  const baseParams = [userId, session.mode, statuses, settings.maxFrequencyRank, settings.includeUnknownFrequency, session.id];
+  const query = `
+    SELECT w.*, COALESCE(s.shown_count, 0) AS shown_count, s.last_answered_at
+    FROM words w
+    LEFT JOIN word_training_stats s ON s.user_id = w.user_id AND s.word_id = w.id AND s.scope = $2
+    WHERE w.user_id = $1
+      AND w.is_active = true
+      AND w.status = ANY($3::text[])
+      AND EXISTS (
+        SELECT 1 FROM word_context_examples e
+        WHERE e.user_id = w.user_id AND e.word_id = w.id AND e.is_active = true
+      )
+      AND ((w.frequency_rank IS NOT NULL AND w.frequency_rank <= $4) OR (w.frequency_rank IS NULL AND $5::boolean = true))
+      AND NOT EXISTS (
+        SELECT 1 FROM training_attempts a
+        WHERE a.session_id = $6 AND a.user_id = $1 AND a.word_id = w.id
+      )
+    ORDER BY COALESCE(s.shown_count, 0) ASC, s.last_answered_at ASC NULLS FIRST, random()
+    LIMIT 1`;
+  let result = await db.query(query, baseParams);
+  if (result.rows[0]) return result.rows[0];
+
+  result = await db.query(
+    `SELECT w.*, COALESCE(s.shown_count, 0) AS shown_count, s.last_answered_at
+     FROM words w
+     LEFT JOIN word_training_stats s ON s.user_id = w.user_id AND s.word_id = w.id AND s.scope = $2
+     WHERE w.user_id = $1
+       AND w.is_active = true
+       AND w.status = ANY($3::text[])
+       AND EXISTS (
+         SELECT 1 FROM word_context_examples e
+         WHERE e.user_id = w.user_id AND e.word_id = w.id AND e.is_active = true
+       )
+       AND ((w.frequency_rank IS NOT NULL AND w.frequency_rank <= $4) OR (w.frequency_rank IS NULL AND $5::boolean = true))
+     ORDER BY COALESCE(s.shown_count, 0) ASC, s.last_answered_at ASC NULLS FIRST, random()
+     LIMIT 1`,
+    baseParams.slice(0, 5)
+  );
+  return result.rows[0] || null;
+}
+
+async function selectContextExample(userId, wordId) {
+  const result = await db.query(
+    `SELECT *
+     FROM word_context_examples
+     WHERE user_id = $1 AND word_id = $2 AND is_active = true AND quality_status = 'valid'
+     ORDER BY shown_count ASC, last_shown_at ASC NULLS FIRST, random()
+     LIMIT 1`,
+    [userId, wordId]
+  );
+  return result.rows[0] || null;
+}
+
+async function getContextDistractors(userId, example, limit) {
+  const result = await db.query(
+    `SELECT e.id, e.word_id, e.answer_text, e.answer_normalized
+     FROM word_context_examples e
+     WHERE e.user_id = $1
+       AND e.is_active = true
+       AND e.quality_status = 'valid'
+       AND e.word_id <> $2
+       AND e.answer_normalized <> $3
+     ORDER BY
+       CASE WHEN e.difficulty = $4 THEN 0 ELSE 1 END,
+       CASE WHEN e.part_of_speech = $5 THEN 0 ELSE 1 END,
+       CASE WHEN e.grammar_form = $6 THEN 0 ELSE 1 END,
+       random()
+     LIMIT $7`,
+    [userId, example.word_id, example.answer_normalized, example.difficulty, example.part_of_speech, example.grammar_form, limit * 3]
+  );
+
+  const unique = [];
+  const seenAnswers = new Set([example.answer_normalized]);
+  const seenWordIds = new Set([example.word_id]);
+  for (const row of result.rows) {
+    if (seenAnswers.has(row.answer_normalized) || seenWordIds.has(row.word_id)) continue;
+    seenAnswers.add(row.answer_normalized);
+    seenWordIds.add(row.word_id);
+    unique.push(row);
+    if (unique.length >= limit) break;
+  }
+  return unique;
 }
 
 async function getDistractors(userId, mode, settings, currentWordId, limit) {
@@ -453,14 +586,15 @@ app.patch("/api/english-words/settings", requireAuth, async (req, res) => {
     const result = await db.query(
       `UPDATE user_training_settings SET
         max_frequency_rank = $1, include_unknown_frequency = $2, ru_to_en_options_count = $3,
-        en_to_ru_options_count = $4, training_direction_mode = $5, hide_options_until_reveal = $6,
-        auto_start_word_on_training = $7, updated_at = now()
-       WHERE user_id = $8 RETURNING *`,
+        en_to_ru_options_count = $4, context_options_count = $5, training_direction_mode = $6, hide_options_until_reveal = $7,
+        auto_start_word_on_training = $8, updated_at = now()
+       WHERE user_id = $9 RETURNING *`,
       [
         settings.maxFrequencyRank,
         settings.includeUnknownFrequency,
         settings.ruToEnOptionsCount,
         settings.enToRuOptionsCount,
+        settings.contextOptionsCount,
         settings.trainingDirectionMode,
         settings.hideOptionsUntilReveal,
         settings.autoStartWordOnTraining,
@@ -491,12 +625,17 @@ app.post("/api/english-words/trainings", requireAuth, async (req, res) => {
   try {
     const mode = String(req.body.mode || "");
     if (!MODES.has(mode)) return res.status(400).json({ error: "INVALID_TRAINING_MODE", message: "Недопустимый режим тренировки." });
+    const questionTypeMode = QUESTION_TYPE_MODES.has(String(req.body.questionTypeMode || ""))
+      ? String(req.body.questionTypeMode)
+      : "default";
     const globalSettingsRow = await getTrainingSettings(req.user.id);
     const baseSnapshot = settingsSnapshotFromRow(globalSettingsRow);
     const settingsSnapshot = req.body.overrideSettings
-      ? { ...baseSnapshot, ...normalizeSettingsPayload(req.body.overrideSettings, false) }
-      : baseSnapshot;
-    const modeStats = await getModeStats(req.user.id, mode, settingsSnapshot);
+      ? { ...baseSnapshot, ...normalizeSettingsPayload(req.body.overrideSettings, false), questionTypeMode }
+      : { ...baseSnapshot, questionTypeMode };
+    const modeStats = questionTypeMode === "context_cloze"
+      ? await getContextModeStats(req.user.id, mode, settingsSnapshot)
+      : await getModeStats(req.user.id, mode, settingsSnapshot);
     if (modeStats.total === 0) return res.status(400).json({ error: "NO_WORDS_AVAILABLE", message: "Нет слов для тренировки с выбранными настройками." });
     const activeWordsCount = await db.query("SELECT COUNT(*)::int AS total FROM words WHERE user_id = $1 AND is_active = true", [req.user.id]);
     if (Number(activeWordsCount.rows[0]?.total || 0) < 2) {
@@ -517,6 +656,35 @@ app.get("/api/english-words/trainings/:sessionId/next", requireAuth, async (req,
     const sessionResult = await db.query("SELECT * FROM training_sessions WHERE id = $1 AND user_id = $2", [req.params.sessionId, req.user.id]);
     const session = sessionResult.rows[0];
     if (!session || session.status !== "active") return res.status(404).json({ error: "TRAINING_NOT_FOUND" });
+    if (session.settings_snapshot.questionTypeMode === "context_cloze") {
+      const word = await selectNextContextWord(req.user.id, session);
+      if (!word) return res.json({ finished: true, message: "Текущий круг тренировки завершён." });
+      const example = await selectContextExample(req.user.id, word.id);
+      if (!example) return res.json({ finished: true, message: "Нет активных контекстных предложений для выбранных слов." });
+      const distractors = await getContextDistractors(req.user.id, example, Number(session.settings_snapshot.contextOptionsCount || 4) - 1);
+      if (distractors.length < 1) {
+        return res.status(400).json({ error: "NOT_ENOUGH_OPTIONS", message: "Недостаточно слов для формирования вариантов ответа." });
+      }
+      const options = shuffle([
+        { id: word.id, wordId: word.id, text: example.answer_text },
+        ...distractors.map((item) => ({ id: item.word_id, wordId: item.word_id, text: item.answer_text })),
+      ]);
+      const snapshot = {
+        wordId: word.id,
+        questionType: "CONTEXT_CLOZE",
+        contextExampleId: example.id,
+        prompt: example.masked_sentence,
+        options,
+        translationAvailable: Boolean(example.ru_translation),
+        hideOptionsUntilReveal: Boolean(session.settings_snapshot.hideOptionsUntilReveal),
+        autoAdvanceAfterAnswer: Boolean(session.settings_snapshot.autoStartWordOnTraining),
+        fullSentence: example.full_sentence,
+        ruTranslation: example.ru_translation,
+        correctAnswerText: example.answer_text,
+      };
+      await db.query("UPDATE training_sessions SET current_question_snapshot = $1::jsonb, updated_at = now() WHERE id = $2 AND user_id = $3", [JSON.stringify(snapshot), session.id, req.user.id]);
+      return res.json(snapshot);
+    }
     const word = await selectNextWord(req.user.id, session);
     if (!word) return res.json({ finished: true, message: "Текущий круг тренировки завершён." });
     const questionType = pickQuestionType(session.settings_snapshot);
@@ -558,11 +726,34 @@ async function recordAttempt({ req, selectedOptionId, skipped }) {
       throw Object.assign(new Error("QUESTION_MISMATCH"), { status: 400 });
     }
     const correctOptionId = snapshot.wordId;
-    const isCorrect = skipped ? null : selectedOptionId === correctOptionId;
+    const isContext = questionType === "CONTEXT_CLOZE";
+    const hintTranslationShown = toBoolean(req.body.hintTranslationShown);
+    const selectedOptionWordId = isContext ? String(req.body.selectedOptionWordId || "") : selectedOptionId;
+    const selectedOptionText = isContext ? toTrimmed(req.body.selectedOptionText) : null;
+    const isCorrect = skipped ? null : selectedOptionWordId === correctOptionId;
     await client.query(
-      `INSERT INTO training_attempts (session_id, user_id, word_id, scope, question_type, prompt, options_snapshot, correct_option_id, selected_option_id, is_correct)
-       VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,$8,$9,$10)`,
-      [session.id, req.user.id, wordId, session.mode, questionType, snapshot.prompt, JSON.stringify(snapshot.options.map((option) => ({ ...option, isCorrect: option.id === correctOptionId }))), correctOptionId, skipped ? null : selectedOptionId, isCorrect]
+      `INSERT INTO training_attempts (
+        session_id, user_id, word_id, scope, question_type, prompt, options_snapshot,
+        correct_option_id, selected_option_id, context_example_id, hint_translation_shown,
+        selected_option_word_id, selected_option_text, correct_answer_text, is_correct
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,$8,$9,$10,$11,$12,$13,$14,$15)`,
+      [
+        session.id,
+        req.user.id,
+        wordId,
+        session.mode,
+        questionType,
+        snapshot.prompt,
+        JSON.stringify(snapshot.options.map((option) => ({ ...option, isCorrect: option.id === correctOptionId }))),
+        correctOptionId,
+        skipped ? null : selectedOptionId,
+        snapshot.contextExampleId || null,
+        hintTranslationShown,
+        skipped ? null : selectedOptionWordId,
+        skipped ? null : selectedOptionText,
+        snapshot.correctAnswerText || null,
+        isCorrect,
+      ]
     );
     await ensureStatForWord(client, req.user.id, wordId, session.mode, 0);
     await client.query(
@@ -578,10 +769,40 @@ async function recordAttempt({ req, selectedOptionId, skipped }) {
        WHERE user_id = $1 AND word_id = $2 AND scope = $3`,
       [req.user.id, wordId, session.mode, skipped ? 0 : 1, isCorrect === true ? 1 : 0, isCorrect === false ? 1 : 0, skipped ? 1 : 0, questionType === "RU_TO_EN" ? 1 : 0, questionType === "EN_TO_RU" ? 1 : 0]
     );
+    if (isContext && snapshot.contextExampleId) {
+      await client.query(
+        `UPDATE word_context_examples SET
+          shown_count = shown_count + 1,
+          correct_count = correct_count + $3,
+          wrong_count = wrong_count + $4,
+          skipped_count = skipped_count + $5,
+          hint_shown_count = hint_shown_count + $6,
+          last_shown_at = now(),
+          updated_at = now()
+         WHERE id = $1 AND user_id = $2`,
+        [
+          snapshot.contextExampleId,
+          req.user.id,
+          isCorrect === true ? 1 : 0,
+          isCorrect === false ? 1 : 0,
+          skipped ? 1 : 0,
+          hintTranslationShown ? 1 : 0,
+        ]
+      );
+    }
     await client.query("UPDATE training_sessions SET current_question_snapshot = NULL, updated_at = now() WHERE id = $1", [session.id]);
     await client.query("COMMIT");
     const correctOption = snapshot.options.find((option) => option.id === correctOptionId);
-    return { skipped, isCorrect, correctOptionId, correctText: correctOption?.text || "" };
+    return {
+      skipped,
+      isCorrect,
+      correctOptionId,
+      correctWordId: snapshot.wordId,
+      correctText: correctOption?.text || snapshot.correctAnswerText || "",
+      correctAnswerText: snapshot.correctAnswerText || correctOption?.text || "",
+      fullSentence: snapshot.fullSentence || null,
+      ruTranslation: snapshot.ruTranslation || null,
+    };
   } catch (error) {
     await client.query("ROLLBACK");
     throw error;
@@ -592,9 +813,17 @@ async function recordAttempt({ req, selectedOptionId, skipped }) {
 
 app.post("/api/english-words/trainings/:sessionId/answer", requireAuth, async (req, res) => {
   try {
-    const selectedOptionId = String(req.body.selectedOptionId || "");
+    const selectedOptionId = String(req.body.selectedOptionId || req.body.selectedOptionWordId || "");
     const result = await recordAttempt({ req, selectedOptionId, skipped: false });
-    return res.json({ isCorrect: result.isCorrect, correctOptionId: result.correctOptionId, correctText: result.correctText });
+    return res.json({
+      isCorrect: result.isCorrect,
+      correctOptionId: result.correctOptionId,
+      correctWordId: result.correctWordId,
+      correctText: result.correctText,
+      correctAnswerText: result.correctAnswerText,
+      fullSentence: result.fullSentence,
+      ruTranslation: result.ruTranslation,
+    });
   } catch (error) {
     if (error.status) return res.status(error.status).json({ error: error.message });
     return handleServerError(res, error);
